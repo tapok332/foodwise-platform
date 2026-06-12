@@ -1,0 +1,61 @@
+# --- Secrets ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+service-account*.json
+gcs-key*.json
+
+# --- Build outputs ---
+*.class
+*.jar
+build/
+.gradle/
+dist/
+target/
+out/
+
+# --- IDE ---
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Node (client-ui workspace) ---
+node_modules/
+.next/
+.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Test / coverage ---
+coverage/
+.nyc_output/
+secrets/
+
+# --- Local-only in the platform repo ---
+# Sibling service repositories — each one is its own git repository
+fw-*/
+# Stale env backups
+.env.bak*
+# Session screenshots / browser artifacts
+*.png
+.playwright-mcp/
+# Internal working documents (not part of the public platform docs)
+docs/superpowers/
+PORTFOLIO-AUDIT-PROMPT.md
+# Claude Code workspace artifacts
+.claude/
+SECURITY-AUDIT.md
+# k8s dev manifests still carry inline dev credentials (Secret yaml, init SQL)
+# — kept local until a dedicated cleanup pass makes them publishable
+k8s/

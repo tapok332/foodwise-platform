@@ -1,0 +1,372 @@
+services:
+
+  # ========================
+  # Infrastructure
+  # ========================
+
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: foodwise-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Forwarded into init-databases.sh (first boot only) so per-service
+      # roles are created with the passwords from .env — nothing hardcoded.
+      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD}
+      PROFILE_DB_PASSWORD: ${PROFILE_DB_PASSWORD}
+      STORE_DB_PASSWORD: ${STORE_DB_PASSWORD}
+      SURPRISEBOX_DB_PASSWORD: ${SURPRISEBOX_DB_PASSWORD}
+      CART_DB_PASSWORD: ${CART_DB_PASSWORD}
+      ORDER_DB_PASSWORD: ${ORDER_DB_PASSWORD}
+      PAYMENT_DB_PASSWORD: ${PAYMENT_DB_PASSWORD}
+      FAVORITES_DB_PASSWORD: ${FAVORITES_DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: foodwise-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://localhost:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Kafka is only used internally between services. No host port exposure;
+      # SASL not configured (pet project scope).
+      # AUTO_CREATE_TOPICS_ENABLE=true is dev-only; production should pre-create
+      # topics explicitly (better partition control, prevents typo-driven topic sprawl).
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: foodwise-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ========================
+  # API Gateway
+  # ========================
+
+  gateway:
+    build:
+      context: ./fw-gateway
+      dockerfile: Dockerfile
+    container_name: foodwise-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      SERVER_PORT: "8080"
+      JWT_SECRET_ACCESS: ${JWT_SECRET_ACCESS}
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      SERVICES_AUTH_URL: http://auth-service:8081
+      SERVICES_PROFILE_URL: http://profile-service:8082
+      SERVICES_STORE_URL: http://store-service:8083
+      SERVICES_SURPRISEBOX_URL: http://surprisebox-service:8084
+      SERVICES_CART_URL: http://cart-service:8085
+      SERVICES_ORDER_URL: http://order-service:8086
+      SERVICES_PAYMENT_URL: http://payment-service:8087
+      SERVICES_FAVORITES_URL: http://favorites-service:8088
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+    depends_on:
+      auth-service:
+        condition: service_started
+      store-service:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # ========================
+  # Auth Service
+  # ========================
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: fw-auth-service/Dockerfile
+      additional_contexts:
+        fw-common: ./fw-common
+        service: ./fw-auth-service
+    container_name: foodwise-auth
+    environment:
+      SERVER_PORT: "8081"
+      SPRING_APPLICATION_NAME: auth-service
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/foodwise_auth
+      SPRING_DATASOURCE_USERNAME: ${AUTH_DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${AUTH_DB_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      JWT_SECRET_ACCESS: ${JWT_SECRET_ACCESS}
+      JWT_SECRET_REFRESH: ${JWT_SECRET_REFRESH}
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      OAUTH_GOOGLE_CLIENT_ID: ${OAUTH_GOOGLE_CLIENT_ID:-}
+      OAUTH_APPLE_CLIENT_ID: ${OAUTH_APPLE_CLIENT_ID:-}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  # ========================
+  # Profile Service
+  # ========================
+
+  profile-service:
+    build:
+      context: .
+      dockerfile: fw-profile-service/Dockerfile
+      additional_contexts:
+        fw-common: ./fw-common
+        service: ./fw-profile-service
+    container_name: foodwise-profile
+    environment:
+      SERVER_PORT: "8082"
+      SPRING_APPLICATION_NAME: profile-service
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/foodwise_profile
+      SPRING_DATASOURCE_USERNAME: ${PROFILE_DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${PROFILE_DB_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/profile-sa.json
+    volumes:
+      - ./secrets/profile-sa.json:/run/secrets/profile-sa.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  # ========================
+  # Store Service
+  # ========================
+
+  store-service:
+    build:
+      context: .
+      dockerfile: fw-store-service/Dockerfile
+      additional_contexts:
+        fw-common: ./fw-common
+        service: ./fw-store-service
+    container_name: foodwise-store
+    environment:
+      SERVER_PORT: "8083"
+      SPRING_APPLICATION_NAME: store-service
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/foodwise_stores
+      SPRING_DATASOURCE_USERNAME: ${STORE_DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${STORE_DB_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+      STORE_TIMEZONE: ${STORE_TIMEZONE:-Europe/Kyiv}
+      SERVICES_SURPRISEBOX_URL: http://surprisebox-service:8084
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  # ========================
+  # SurpriseBox Service
+  # ========================
+
+  surprisebox-service:
+    build:
+      context: .
+      dockerfile: fw-surprisebox-service/Dockerfile
+      additional_contexts:
+        fw-common: ./fw-common
+        service: ./fw-surprisebox-service
+    container_name: foodwise-surprisebox
+    environment:
+      SERVER_PORT: "8084"
+      SPRING_APPLICATION_NAME: surprisebox-service
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/foodwise_surprisebox
+      SPRING_DATASOURCE_USERNAME: ${SURPRISEBOX_DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${SURPRISEBOX_DB_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SERVICES_STORE_SERVICE_URL: http://store-service:8083
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  # ========================
+  # Cart Service
+  # ========================
+
+  cart-service:
+    build:
+      context: .
+      dockerfile: fw-cart-service/Dockerfile
+      additional_contexts:
+        fw-common: ./fw-common
+        service: ./fw-cart-service
+    container_name: foodwise-cart
+    environment:
+      SERVER_PORT: "8085"
+      SPRING_APPLICATION_NAME: cart-service
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/foodwise_cart
+      SPRING_DATASOURCE_USERNAME: ${CART_DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${CART_DB_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SERVICES_STORE_SERVICE_URL: http://store-service:8083
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  # ========================
+  # Order Service
+  # ========================
+
+  order-service:
+    build:
+      context: .
+      dockerfile: fw-order-service/Dockerfile
+      additional_contexts:
+        fw-common: ./fw-common
+        service: ./fw-order-service
+    container_name: foodwise-order
+    environment:
+      SERVER_PORT: "8086"
+      SPRING_APPLICATION_NAME: order-service
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/foodwise_orders
+      SPRING_DATASOURCE_USERNAME: ${ORDER_DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${ORDER_DB_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SERVICES_STORE_SERVICE_URL: http://store-service:8083
+      SERVICES_PROFILE_SERVICE_URL: http://profile-service:8082
+      SERVICES_SURPRISEBOX_SERVICE_URL: http://surprisebox-service:8084
+      SERVICES_PAYMENT_SERVICE_URL: http://payment-service:8087
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  # ========================
+  # Payment Service
+  # ========================
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: fw-payment-service/Dockerfile
+      additional_contexts:
+        fw-common: ./fw-common
+        service: ./fw-payment-service
+    container_name: foodwise-payment
+    environment:
+      SERVER_PORT: "8087"
+      SPRING_APPLICATION_NAME: payment-service
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/foodwise_payment
+      SPRING_DATASOURCE_USERNAME: ${PAYMENT_DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${PAYMENT_DB_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+      # Stripe integration (test keys via .env; never bake into image)
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_API_VERSION: ${STRIPE_API_VERSION:-2024-12-18.acacia}
+      PAYMENT_DEFAULT_PROVIDER: ${PAYMENT_DEFAULT_PROVIDER:-stripe}
+      PAYMENT_DEFAULT_CURRENCY: ${PAYMENT_DEFAULT_CURRENCY:-uah}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  # ========================
+  # Favorites Service
+  # ========================
+
+  favorites-service:
+    build:
+      context: .
+      dockerfile: fw-favorites-service/Dockerfile
+      additional_contexts:
+        fw-common: ./fw-common
+        service: ./fw-favorites-service
+    container_name: foodwise-favorites
+    environment:
+      SERVER_PORT: "8088"
+      SPRING_APPLICATION_NAME: favorites-service
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/foodwise_favorites
+      SPRING_DATASOURCE_USERNAME: ${FAVORITES_DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${FAVORITES_DB_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  # ========================
+  # Client UI (Next.js)
+  # ========================
+
+  client-ui:
+    build:
+      context: ./fw-client-ui
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_DEFAULT_LAT: ${NEXT_PUBLIC_DEFAULT_LAT:-50.4501}
+        NEXT_PUBLIC_DEFAULT_LNG: ${NEXT_PUBLIC_DEFAULT_LNG:-30.5234}
+        NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: ${NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY:-}
+        NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${NEXT_PUBLIC_GOOGLE_CLIENT_ID:-}
+    container_name: foodwise-client-ui
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+      # SSR/server-side fetches go to gateway via docker network.
+      # Browser-side fetches fall back to http://localhost:8080 (compiled-in default,
+      # since API_BASE_URL is not NEXT_PUBLIC_ and gateway is exposed on host:8080).
+      API_BASE_URL: http://gateway:8080
+    depends_on:
+      - gateway
+
+volumes:
+  postgres-data:
